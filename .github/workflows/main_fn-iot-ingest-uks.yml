@@ -1,4 +1,5 @@
 
+
 name: Build and deploy Python project to Azure Function App - fn-iot-ingest-uks
 
 on:
@@ -20,7 +21,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python version
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -44,17 +45,18 @@ jobs:
 
       # Optional: run tests here
 
-      - name: Zip artifact for deployment
+      - name: Archive app for deploy
         working-directory: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
         run: |
           test -f host.json || (echo "ERROR: host.json not found in $PWD" && exit 1)
-          zip -r ../release.zip . -x "**/venv/**"
+          zip -r ../functionapp.zip . -x "**/venv/**" ".git/*" ".github/*"
 
-      - name: Upload artifact for deployment job
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: python-app
-          path: release.zip
+          name: functionapp-artifact
+          path: functionapp.zip
+          if-no-files-found: error
 
   deploy:
     runs-on: ubuntu-latest
@@ -64,29 +66,27 @@ jobs:
       contents: read
 
     steps:
-      - name: Download artifact from build job
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: python-app
+          name: functionapp-artifact
 
-      - name: Unzip artifact for deployment
+      - name: Unzip package
         run: |
-          unzip release.zip -d package
-          rm release.zip
-        
-      - name: Login to Azure (OIDC)
+          unzip functionapp.zip -d package
+          rm functionapp.zip
+
+      - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_76B4F6C178E648529D2479098CFD42DB }}
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_582A77BEF5F24F71973511B29A4447E9 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_CD292E82CB2B4173AD61B01E95DB2BE3 }}
 
-      - name: 'Deploy to Azure Functions'
-        uses: Azure/functions-action@v1
-        id: deploy-to-function
-        with:
-          app-name: 'fn-iot-ingest-uks'
-          slot-name: 'Production'
-          package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
 
-          
+      - name: Deploy to Azure Functions
+        uses: azure/functions-action@v1
+        with:
+          app-name: fn-iot-ingest-uks
+          slot-name: Production
+          package: ./package
