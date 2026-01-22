@@ -1,5 +1,3 @@
-
-
 name: Build and deploy Python project to Azure Function App - fn-iot-ingest-uks
 
 on:
@@ -8,13 +6,14 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'   # folder that contains host.json & requirements.txt
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'   # folder with host.json & requirements.txt
   PYTHON_VERSION: '3.11'
 
 jobs:
-  build:
+  build_and_deploy:
     runs-on: ubuntu-latest
     permissions:
+      id-token: write
       contents: read
 
     steps:
@@ -26,55 +25,19 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Show working directory and files (debug)
-        run: |
-          pwd
-          ls -la
-          echo "Listing package path: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}"
-          ls -la ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-
-      - name: Create virtual environment
+      - name: Verify expected files exist
         working-directory: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-        run: python -m venv venv
+        run: |
+          test -f host.json || (echo "ERROR: host.json not found" && exit 1)
+          test -f requirements.txt || (echo "ERROR: requirements.txt not found" && exit 1)
+          test -f HttpIngest/function.json || (echo "ERROR: HttpIngest/function.json not found" && exit 1)
+          test -f HttpIngest/__init__.py || (echo "ERROR: HttpIngest/__init__.py not found" && exit 1)
 
       - name: Install dependencies
         working-directory: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      # Optional: run tests here
-
-      - name: Archive app for deploy
-        working-directory: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-        run: |
-          test -f host.json || (echo "ERROR: host.json not found in $PWD" && exit 1)
-          zip -r ../functionapp.zip . -x "**/venv/**" ".git/*" ".github/*"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: functionapp-artifact
-          path: functionapp.zip
-          if-no-files-found: error
-
-  deploy:
-    runs-on: ubuntu-latest
-    needs: build
-    permissions:
-      id-token: write
-      contents: read
-
-    steps:
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: functionapp-artifact
-
-      - name: Unzip package
-        run: |
-          unzip functionapp.zip -d package
-          rm functionapp.zip
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
@@ -83,10 +46,11 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_582A77BEF5F24F71973511B29A4447E9 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_CD292E82CB2B4173AD61B01E95DB2BE3 }}
 
-
       - name: Deploy to Azure Functions
         uses: azure/functions-action@v1
         with:
           app-name: fn-iot-ingest-uks
           slot-name: Production
-          package: ./package
+          package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+          # Or use a publish profile instead of OIDC:
+          # publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_XXXX }}
