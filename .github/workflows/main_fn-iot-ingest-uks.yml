@@ -1,56 +1,85 @@
+# Docs for the Azure Web Apps Deploy action: https://github.com/azure/functions-action
+# More GitHub Actions for Azure: https://github.com/Azure/actions
+# More info on Python, GitHub Actions, and Azure Functions: https://aka.ms/python-webapps-actions
+
 name: Build and deploy Python project to Azure Function App - fn-iot-ingest-uks
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   workflow_dispatch:
 
 env:
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'   # folder with host.json & requirements.txt
-  PYTHON_VERSION: '3.11'
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.' # set this to the path to your web app project, defaults to the repository root
+  PYTHON_VERSION: '3.11' # set this to the python version to use (supports 3.6, 3.7, 3.8)
 
 jobs:
-  build_and_deploy:
+  build:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
-      contents: read
+      contents: read #This is required for actions/checkout
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python version
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Verify expected files exist
-        working-directory: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+      - name: Create and start virtual environment
         run: |
-          test -f host.json || (echo "ERROR: host.json not found" && exit 1)
-          test -f requirements.txt || (echo "ERROR: requirements.txt not found" && exit 1)
-          test -f HttpIngest/function.json || (echo "ERROR: HttpIngest/function.json not found" && exit 1)
-          test -f HttpIngest/__init__.py || (echo "ERROR: HttpIngest/__init__.py not found" && exit 1)
+          python -m venv venv
+          source venv/bin/activate
 
       - name: Install dependencies
-        working-directory: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
-      - name: Azure login (OIDC)
+      # Optional: Add step to run tests here
+
+      - name: Zip artifact for deployment
+        run: zip release.zip ./* -r
+
+      - name: Upload artifact for deployment job
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-app
+          path: |
+            release.zip
+            !venv/
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      id-token: write #This is required for requesting the JWT
+      contents: read #This is required for actions/checkout
+
+    steps:
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: python-app
+
+      - name: Unzip artifact for deployment
+        run: |
+          unzip release.zip
+          rm release.zip
+        
+      - name: Login to Azure
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_76B4F6C178E648529D2479098CFD42DB }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_582A77BEF5F24F71973511B29A4447E9 }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_CD292E82CB2B4173AD61B01E95DB2BE3 }}
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_B6C6544D76934B8585B3DC82DDA7897E }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_EB6A9A11B4594809A29A5548EF649390 }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_5183A9C69C7141709ACC7CDB5AEA8F3F }}
 
-      - name: Deploy to Azure Functions
-        uses: azure/functions-action@v1
+      - name: 'Deploy to Azure Functions'
+        uses: Azure/functions-action@v1
+        id: deploy-to-function
         with:
-          app-name: fn-iot-ingest-uks
-          slot-name: Production
+          app-name: 'fn-iot-ingest-uks'
+          slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          # Or use a publish profile instead of OIDC:
-          # publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_XXXX }}
+          
