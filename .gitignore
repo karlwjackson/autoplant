@@ -1,0 +1,8 @@
+# venv
+.venv/
+# Streamlit caches
+__pycache__/
+# Local secrets (never commit)
+.streamlit/secrets.toml
+# Optional: local logs
+*.log
