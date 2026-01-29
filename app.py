@@ -27,7 +27,7 @@ CONTAINER_NAME = st.secrets.get("CONTAINER_NAME", "")
 BLOB_PREFIX = st.secrets.get("BLOB_PREFIX", "")  # optional
 
 # NEW: SAS secrets (use either one)
-ACCOUNT_SAS_URL = st.secrets.get("ACCOUNT_SAS_URL", "").strip()     # e.g. https://<acct>.blob.core.windows.net/?sv=...&ss=b&srt=co&sp=rl&se=...
+ACCOUNT_SAS_URL = st.secrets.get("ACCOUNT_SAS_URL", "").strip()     # e.g. https://<acct>.blob.core.windows.net/?sv=......
 CONTAINER_SAS_URL = st.secrets.get("CONTAINER_SAS_URL", "").strip() # e.g. https://<acct>.blob.core.windows.net/<container>?<sas>
 
 # Basic validation for local fallback
@@ -85,7 +85,7 @@ def get_container_client() -> ContainerClient:
     if CONTAINER_SAS_URL:
         return ContainerClient.from_container_url(CONTAINER_SAS_URL)
 
-    # 2) Account SAS URL (e.g. https://acct.blob.core.windows.net/?sv=...&ss=b&srt=co&sp=rl...)
+    # 2) Account SAS URL (e.g. https://acct.blob.core.windows.net/?sv=......)
     if ACCOUNT_SAS_URL:
         if not CONTAINER_NAME:
             st.error("CONTAINER_NAME must be set when using ACCOUNT_SAS_URL.")
