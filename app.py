@@ -8,6 +8,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from urllib.parse import urlsplit
+
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, BlobProperties, ContainerClient  # ← added ContainerClient
 
@@ -61,30 +63,44 @@ with st.sidebar:
 # -----------------------------
 # Azure auth & clients
 # -----------------------------
+
 @st.cache_resource(show_spinner=False)
 def get_container_client() -> ContainerClient:
     """
     Three modes:
       1) CONTAINER_SAS_URL present  -> use it directly (read-only)
-      2) ACCOUNT_SAS_URL present    -> scope it to container in code (read-only)
-      3) Fallback to DefaultAzureCredential (local dev / managed identity)
+      2) ACCOUNT_SAS_URL present    -> scope it to container (read-only)
+      3) DefaultAzureCredential     -> local dev / managed identity
     """
-    # 1) Container SAS URL (preferred if you generated container-level SAS via CLI)
+    # 1) Container SAS URL (already scoped to container, e.g. https://acct.blob.core.windows.net/<container>?<sas>)
     if CONTAINER_SAS_URL:
         return ContainerClient.from_container_url(CONTAINER_SAS_URL)
 
-    # 2) Account SAS URL (new portal UI). Must scope it to container here.
+    # 2) Account SAS URL (e.g. https://acct.blob.core.windows.net/?sv=...&ss=b&srt=co&sp=rl...)
     if ACCOUNT_SAS_URL:
         if not CONTAINER_NAME:
             st.error("CONTAINER_NAME must be set when using ACCOUNT_SAS_URL.")
             st.stop()
-        container_url = f"{ACCOUNT_SAS_URL.rstrip('/')}/{CONTAINER_NAME}"
+
+        parts = urlsplit(ACCOUNT_SAS_URL)
+        if not parts.scheme or not parts.netloc or not parts.query:
+            st.error("ACCOUNT_SAS_URL looks invalid. Use the full 'Blob service SAS URL' from the portal (includes ?sv=...).")
+            st.stop()
+
+        # Build https://<account>.blob.core.windows.net/<container>?<sas-query>
+        base = f"{parts.scheme}://{parts.netloc}"
+        container_url = f"{base}/{CONTAINER_NAME}?{parts.query}"
+
+        # Optional: show a safe hint to confirm (no token leakage)
+        # st.caption(f"Auth: SAS (account) → {base}/{CONTAINER_NAME}?<redacted>")
+
         return ContainerClient.from_container_url(container_url)
 
-    # 3) Entra/RBAC (original behavior). Requires az login locally or a managed identity in Azure.
+    # 3) Fallback to Entra/RBAC (local dev or Azure with Managed Identity)
     cred = DefaultAzureCredential(exclude_shared_token_cache_credential=False)
-    bsc = BlobServiceClient(account_url=ACCOUNT_URL, credential=cred)
+    bsc = BlobServiceClient(account_url=f"https://{ACCOUNT_NAME}.blob.core.windows.net", credential=cred)
     return bsc.get_container_client(CONTAINER_NAME)
+
 
 container_client = get_container_client()
 
