@@ -60,6 +60,15 @@ with st.sidebar:
     show_roll = st.checkbox("Show 3-interval rolling avg", value=True)
     show_anomalies = st.checkbox("Flag anomalies (robust z-score |z|>3)", value=False)
 
+    st.divider()
+    st.header("Targets")
+    water_temp_target = st.number_input(
+        "Water Temp Target (°C)",
+        min_value=0.0, max_value=50.0, value=18.0, step=0.1,
+        help="KPI delta will show Latest − Target and color red when above target."
+    )
+
+
 # -----------------------------
 # Azure auth & clients
 # -----------------------------
@@ -273,18 +282,56 @@ pretty = {
     "PPD_K": "PPD (K)"
 }
 
-def _kpi_metric(col, label, dfk):
+def _kpi_metric(col, label, dfk, *, target: float | None = None):
+    """
+    Shows KPI for the latest value (averaged across devices).
+    If 'target' is provided, delta = latest − target, with delta_color='inverse'
+      (so positive deltas show in red; negative deltas show in green).
+    If no target provided, fallback to original behavior (latest − earliest).
+    """
+    pretty = {
+        "WaterTempC": "Water Temp (°C)",
+        "AirTempC": "Air Temp (°C)",
+        "HumidityPct": "Humidity (%)",
+        "Lux": "Light (Lux)",
+        "PPD_K": "PPD (K)",
+    }
+
     if dfk.empty:
-        col.metric(pretty[label], "–", "–"); return
+        col.metric(pretty.get(label, label), "–", "–")
+        return
+
+    # Latest and earliest means across devices (kept for fallback)
     bydev = dfk.sort_values("Timestamp").groupby("deviceId")[label]
     latest = bydev.last().mean()
     earliest = bydev.first().mean()
-    delta = (latest - earliest) if pd.notna(latest) and pd.notna(earliest) else None
-    col.metric(pretty[label], f"{latest:.2f}" if pd.notna(latest) else "–", f"{delta:+.2f}" if delta is not None else "–")
 
-for i, key in enumerate(pretty.keys()):
-    _kpi_metric(kpi_cols[i], key, df_15)
+    if pd.isna(latest):
+        col.metric(pretty.get(label, label), "–", "–")
+        return
 
+    value_str = f"{latest:.2f}"
+
+    if target is not None:
+        delta_val = latest - target
+        delta_str = f"{delta_val:+.2f}"
+        # inverse -> positive is red, negative is green
+        col.metric(pretty.get(label, label), value_str, delta_str, delta_color="inverse")
+    else:
+        # Fallback to original earliest-vs-latest delta
+        if pd.notna(earliest):
+            delta_val = latest - earliest
+            delta_str = f"{delta_val:+.2f}"
+        else:
+            delta_str = "–"
+        col.metric(pretty.get(label, label), value_str, delta_str)
+
+# WaterTempC uses target; others keep original (latest - earliest) delta
+_kpi_metric(kpi_cols[0], "WaterTempC", df_15, target=water_temp_target)
+_kpi_metric(kpi_cols[1], "AirTempC",   df_15)
+_kpi_metric(kpi_cols[2], "HumidityPct", df_15)
+_kpi_metric(kpi_cols[3], "Lux",         df_15)
+_kpi_metric(kpi_cols[4], "PPD_K",       df_15)
 latest_ts = df_15["Timestamp"].max()
 if pd.notna(latest_ts):
     st.caption(f"Latest timestamp in view: **{latest_ts.strftime('%Y-%m-%d %H:%M UTC')}**")
