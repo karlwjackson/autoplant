@@ -355,7 +355,7 @@ c1, c2 = st.columns(2)
 with c1:
     plot_timeseries(df_15, "WaterTempC", "Water Temperature (°C)")
     plot_timeseries(df_15, "HumidityPct", "Humidity (%)")
-    plot_timeseries(df_15, "PPD_K", "Predicted Percentage Dissatisfied (K)")
+    #plot_timeseries(df_15, "PPD_K", "Predicted Percentage Dissatisfied (K)")
 with c2:
     plot_timeseries(df_15, "AirTempC", "Air Temperature (°C)")
     plot_timeseries(df_15, "Lux", "Illuminance (Lux)")
