@@ -56,7 +56,7 @@ with st.sidebar:
     st.divider()
 
     st.header("Visualization")
-    lookback_hours = st.slider("Lookback (hours)", 1, 24*14, 48)
+    lookback_hours = st.slider("Lookback (hours)", 1, 24*14, 4)
     show_roll = st.checkbox("Show 3-interval rolling avg", value=True)
     show_anomalies = st.checkbox("Flag anomalies (robust z-score |z|>3)", value=False)
 
