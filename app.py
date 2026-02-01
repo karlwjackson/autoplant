@@ -1,5 +1,4 @@
 import io
-import json  # kept in case you still want to parse some JSON metadata later
 from typing import List, Iterable
 from datetime import datetime, timezone, timedelta
 
@@ -26,8 +25,8 @@ ACCOUNT_NAME = st.secrets.get("ACCOUNT_NAME", "")
 CONTAINER_NAME = st.secrets.get("CONTAINER_NAME", "")
 BLOB_PREFIX = st.secrets.get("BLOB_PREFIX", "")  # optional
 
-# SAS secrets (optional)
-ACCOUNT_SAS_URL = st.secrets.get("ACCOUNT_SAS_URL", "").strip()     # e.g. https://<acct>.blob.core.windows.net/?sv=...
+# NEW: SAS secrets (use either one)
+ACCOUNT_SAS_URL = st.secrets.get("ACCOUNT_SAS_URL", "").strip()     # e.g. https://<acct>.blob.core.windows.net/?sv=......
 CONTAINER_SAS_URL = st.secrets.get("CONTAINER_SAS_URL", "").strip() # e.g. https://<acct>.blob.core.windows.net/<container>?<sas>
 
 # Basic validation for local fallback
@@ -54,9 +53,9 @@ with st.sidebar:
     blob_prefix = st.text_input(
         "Blob prefix (optional)",
         value=BLOB_PREFIX,
-        help="Parent folder (e.g., 'telemetry/'). Scan is recursive, so daily subfolders are fine."
+        help="Leave blank to scan entire container. Example: 'telemetry/' (recursively scans daily folders)."
     )
-    max_files = st.slider("Max files to load (safety)", 1, 5000, 1000, help="Stops after this many Parquet files.")
+    max_files = st.slider("Max files to load (safety)", 1, 5000, 1000, help="Stop after this many Parquet files.")
     st.divider()
 
     st.header("Visualization")
@@ -83,11 +82,11 @@ def get_container_client() -> ContainerClient:
       2) ACCOUNT_SAS_URL present    -> scope it to container (read-only)
       3) DefaultAzureCredential     -> local dev / managed identity
     """
-    # 1) Container SAS URL
+    # 1) Container SAS URL (already scoped to container)
     if CONTAINER_SAS_URL:
         return ContainerClient.from_container_url(CONTAINER_SAS_URL)
 
-    # 2) Account SAS URL
+    # 2) Account SAS URL (scope to container)
     if ACCOUNT_SAS_URL:
         if not CONTAINER_NAME:
             st.error("CONTAINER_NAME must be set when using ACCOUNT_SAS_URL.")
@@ -102,15 +101,15 @@ def get_container_client() -> ContainerClient:
         container_url = f"{base}/{CONTAINER_NAME}?{parts.query}"
         return ContainerClient.from_container_url(container_url)
 
-    # 3) Entra/RBAC
+    # 3) Fallback to Entra/RBAC (local dev or Azure with Managed Identity)
     cred = DefaultAzureCredential(exclude_shared_token_cache_credential=False)
-    bsc = BlobServiceClient(account_url=f"https://{ACCOUNT_NAME}.blob.core.windows.net", credential=cred)
+    bsc = BlobServiceClient(account_url=ACCOUNT_URL, credential=cred)
     return bsc.get_container_client(CONTAINER_NAME)
 
 container_client = get_container_client()
 
 # -----------------------------
-# Helpers for Parquet loading
+# Helpers for Parquet loading & parsing
 # -----------------------------
 def _ensure_pyarrow() -> bool:
     try:
@@ -121,6 +120,7 @@ def _ensure_pyarrow() -> bool:
         return False
 
 def _read_parquet_to_df(raw_bytes: bytes, columns: List[str] | None = None) -> pd.DataFrame:
+    """Read Parquet bytes into a DataFrame with optional column projection."""
     buf = io.BytesIO(raw_bytes)
     try:
         return pd.read_parquet(buf, engine="pyarrow", columns=columns)
@@ -180,11 +180,14 @@ def _resample_15m(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     frames = []
     for dev, g in df.groupby("deviceId"):
         s = g.set_index("Timestamp").sort_index()
+
         numeric_s = s[cols].apply(pd.to_numeric, errors="coerce")
         resampled_numeric = numeric_s.resample("15min").mean(numeric_only=True)
         resampled_numeric = resampled_numeric.interpolate(limit=2, limit_direction="both")
+
         resampled_numeric["deviceId"] = dev
-        frames.append(resampled_numeric.reset_index())
+        resampled_numeric = resampled_numeric.reset_index()
+        frames.append(resampled_numeric)
 
     return pd.concat(frames, ignore_index=True)
 
@@ -199,11 +202,11 @@ def list_parquet_blob_names(prefix: str, limit: int, lookback_hours: int) -> Lis
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours + 2)
     recent: List[str] = []
-    pager: Iterable[BlobProperties] = container_client.list_blobs(name_starts_with=prefix or None)
 
+    pager: Iterable[BlobProperties] = container_client.list_blobs(name_starts_with=prefix or None)
     for bp in pager:
-        name = bp.name.lower()
-        if not name.endswith(".parquet"):
+        name_lc = bp.name.lower()
+        if not name_lc.endswith(".parquet"):
             continue
         if bp.last_modified and bp.last_modified >= cutoff:
             recent.append(bp.name)
@@ -232,6 +235,7 @@ def load_and_merge_parquet(prefix: str, limit: int, lookback_hours: int) -> pd.D
     if not names:
         return pd.DataFrame()
 
+    # Project only the columns we use downstream
     required_columns = ["deviceId", "Timestamp", "AirTempC", "HumidityPct", "WaterTempC", "Lux", "PPD_K"]
 
     dfs: List[pd.DataFrame] = []
@@ -274,8 +278,142 @@ df_15 = df_15[df_15["deviceId"].isin(selected_devices)]
 # Rolling avg
 if show_roll:
     for c in value_cols:
-        df_15[f"{c}_roll"] = df_15.groupby("deviceId")[c].transform(lambda s: s.rolling(3, min_periods=1).mean())
+        if c in df_15.columns:
+            df_15[f"{c}_roll"] = (
+                df_15.groupby("deviceId")[c]
+                .transform(lambda s: s.rolling(3, min_periods=1).mean())
+            )
 
 # Anomalies
 if show_anomalies:
     for c in value_cols:
+        if c in df_15.columns:
+            z = df_15.groupby("deviceId")[c].transform(_robust_zscore)
+            df_15[f"{c}_anomaly"] = z.abs() > 3
+
+# -----------------------------
+# KPIs
+# -----------------------------
+kpi_cols = st.columns(5)
+pretty = {
+    "WaterTempC": "Water Temp (°C)",
+    "AirTempC": "Air Temp (°C)",
+    "HumidityPct": "Humidity (%)",
+    "Lux": "Light (Lux)",
+    "PPD_K": "PPD (K)"
+}
+
+def _kpi_metric(col, label, dfk, *, target: float | None = None):
+    """
+    Shows KPI for the latest value (averaged across devices).
+    If 'target' is provided, delta = latest − target (delta_color='inverse').
+    Else fallback to latest − earliest across the window.
+    """
+    label_pretty = pretty.get(label, label)
+
+    if dfk.empty:
+        col.metric(label_pretty, "–", "–")
+        return
+
+    bydev = dfk.sort_values("Timestamp").groupby("deviceId")[label]
+    latest = bydev.last().mean()
+    earliest = bydev.first().mean()
+
+    if pd.isna(latest):
+        col.metric(label_pretty, "–", "–")
+        return
+
+    value_str = f"{latest:.2f}"
+
+    if target is not None:
+        delta_val = latest - target
+        delta_str = f"{delta_val:+.2f}"
+        col.metric(label_pretty, value_str, delta_str, delta_color="inverse")
+    else:
+        if pd.notna(earliest):
+            delta_val = latest - earliest
+            delta_str = f"{delta_val:+.2f}"
+        else:
+            delta_str = "–"
+        col.metric(label_pretty, value_str, delta_str)
+
+# WaterTempC uses target; others keep original (latest - earliest) delta
+_kpi_metric(kpi_cols[0], "WaterTempC", df_15, target=water_temp_target)
+_kpi_metric(kpi_cols[1], "AirTempC",   df_15)
+_kpi_metric(kpi_cols[2], "HumidityPct", df_15)
+_kpi_metric(kpi_cols[3], "Lux",         df_15)
+_kpi_metric(kpi_cols[4], "PPD_K",       df_15)
+latest_ts = df_15["Timestamp"].max()
+if pd.notna(latest_ts):
+    st.caption(f"Latest timestamp in view: **{latest_ts.strftime('%Y-%m-%d %H:%M UTC')}**")
+
+# -----------------------------
+# Charts
+# -----------------------------
+def plot_timeseries(df_plot: pd.DataFrame, y: str, title: str):
+    if df_plot.empty:
+        st.info(f"No data to plot for {title}.")
+        return
+
+    # Build long-form data: Actual vs Rolling
+    parts = []
+
+    # Actual
+    actual = df_plot[["Timestamp", "deviceId", y]].rename(columns={y: "value"})
+    actual["series"] = "Actual"
+    parts.append(actual)
+
+    # Rolling (only if exists & checkbox is on)
+    roll_col = f"{y}_roll"
+    if show_roll and roll_col in df_plot.columns:
+        rolling = df_plot[["Timestamp", "deviceId", roll_col]].rename(columns={roll_col: "value"})
+        rolling["series"] = "Rolling"
+        parts.append(rolling)
+
+    df_long = pd.concat(parts, ignore_index=True).dropna(subset=["value"])
+
+    # Explicit colors: Actual=blue, Rolling=red
+    color_map = {
+        "Actual": "#1f77b4",   # Plotly default blue
+        "Rolling": "#d62728",  # Plotly default red
+    }
+
+    fig = px.line(
+        df_long,
+        x="Timestamp",
+        y="value",
+        color="series",          # color by series type (Actual vs Rolling)
+        line_group="deviceId",   # group lines per device so pairs don't mix
+        hover_data=["deviceId"],
+        title=title,
+        template="plotly_white",
+        labels={"value": title, "deviceId": "Device", "series": "Series"},
+        color_discrete_map=color_map,
+    )
+
+    # Style lines: Actual thicker; Rolling dashed
+    fig.update_traces(selector=lambda tr: tr.name == "Actual", line=dict(width=3))
+    fig.update_traces(selector=lambda tr: tr.name == "Rolling", line=dict(dash="dash", width=2))
+
+    fig.update_layout(height=350, margin=dict(l=10, r=10, t=40, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Optional anomaly message
+    anom_col = f"{y}_anomaly"
+    if show_anomalies and anom_col in df_plot.columns and df_plot[anom_col].any():
+        st.warning(f"Anomalies flagged for **{title}**: {int(df_plot[anom_col].sum())} points (|robust z| > 3).")
+
+c1, c2 = st.columns(2)
+with c1:
+    plot_timeseries(df_15, "WaterTempC", "Water Temperature (°C)")
+    plot_timeseries(df_15, "HumidityPct", "Humidity (%)")
+    #plot_timeseries(df_15, "PPD_K", "Predicted Percentage Dissatisfied (K)")
+with c2:
+    plot_timeseries(df_15, "AirTempC", "Air Temperature (°C)")
+    plot_timeseries(df_15, "Lux", "Illuminance (Lux)")
+
+# Raw table
+with st.expander("Raw data (current window)"):
+    st.dataframe(df_15.sort_values(["deviceId", "Timestamp"]), use_container_width=True, hide_index=True)
+
+st.success("Dashboard ready. Adjust the sidebar to change window, devices, anomalies, etc.")
